@@ -87,7 +87,7 @@ data ServiceReport = ServiceReport
 pattern ReportSvcStopped = ServiceReport SERVICE_STOPPED NO_ERROR 0
 pattern ReportSvcRunning = ServiceReport SERVICE_RUNNING NO_ERROR 0
 pattern ReportSvcStartPending = ServiceReport SERVICE_START_PENDING NO_ERROR 3000
-pattern ReportSvcStopPending = ServiceReport SERVICE_STOP_PENDING NO_ERROR 0
+pattern ReportSvcStopPending = ServiceReport SERVICE_STOP_PENDING NO_ERROR 4000
 
 pattern SERVICE_CONTROL_STOP :: DWORD
 pattern SERVICE_CONTROL_STOP = 0x00000001
@@ -100,6 +100,8 @@ pattern SERVICE_CONTROL_CONTINUE = 0x00000003
 
 pattern SERVICE_CONTROL_INTERROGATE :: DWORD
 pattern SERVICE_CONTROL_INTERROGATE = 0x00000004
+
+data SvcCtrlMsg = SvcCtrlMsg
 
 
 mkStdFunPtr :: TypeQ -> ExpQ
@@ -130,5 +132,6 @@ winSvcTypesTable = Map.fromList
   , (C.TypeName "HANDLE", [t| Ptr Handle |])
   , (C.TypeName "DWORD", [t| DWORD |])
   , (C.TypeName "LPTSTR", [t| LPTSTR |])
+  , (C.TypeName "LPVOID", [t| LPVOID |])
   ]
       

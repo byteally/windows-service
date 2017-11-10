@@ -21,6 +21,7 @@ import System.IO.Unsafe (unsafePerformIO)
 import Control.Monad
 import System.Environment
 import Control.Concurrent.Async
+import Control.Concurrent.MVar
 
 
 C.context winSvcCtx
@@ -147,11 +148,13 @@ svcUnInstall = [C.block|void {
 
 stopSvc :: IO ()
 stopSvc = do
+  svcReportEvent (fromString "Start: stopSvc")
   stopEventHPtr <- svcStopEventHandle <$> readIORef svcState
   [C.block| void {
     HANDLE ghSvcStopEvent = $fptr-ptr:(HANDLE stopEventHPtr);
     SetEvent(ghSvcStopEvent);
-}|]
+  }|]
+  svcReportEvent (fromString "End: stopSvc")
 
 createSvcEvent :: IO Bool
 createSvcEvent = do
@@ -174,25 +177,26 @@ createSvcEvent = do
     True -> reportSvcStatus ReportSvcStopped >> pure False
     False -> pure True
 
-svcInit :: IO () -> IO ()
-svcInit svc = do
+svcInit :: MVar SvcCtrlMsg -> IO () -> IO ()
+svcInit svcCtrlMsg svc = do
   svcReportEvent (fromString "Inside SVC Init")
-  isEvtCreated <- createSvcEvent
+  isEvtCreated <- pure True --createSvcEvent
   when (not isEvtCreated) (reportSvcStatus ReportSvcStopped) 
   when isEvtCreated $ do
     stopEventHPtr <- svcStopEventHandle <$> readIORef svcState
     reportSvcStatus ReportSvcRunning
     svcAsync <- async svc
+    {-
     [C.block| void {
       HANDLE ghSvcStopEvent = $fptr-ptr:(HANDLE stopEventHPtr);
-      while(1)
+      // WaitForSingleObject(ghSvcStopEvent, INFINITE);
+      while (WaitForSingleObject(ghSvcStopEvent, 0) != WAIT_OBJECT_0)
       {
-        // Check whether to stop the service.
-
-        WaitForSingleObject(ghSvcStopEvent, INFINITE);
-        break;
+        Sleep(3000);
       }
     }|]
+    -}
+    void $ takeMVar svcCtrlMsg 
     svcReportEvent (fromString "Cancelling HS SVC")
     cancel svcAsync 
     reportSvcStatus ReportSvcStopped
@@ -232,13 +236,15 @@ getSvcCurrentState = do
 svcMain :: IO () -> IO ()
 svcMain svc = do
   svcReportEvent (fromString "Really Inside SVC Main")
-  svcCtrlHandlerPtr  <- $(C.mkFunPtr [t|DWORD -> IO ()|]) svcCtrlHandler
+  svcCtrlMsg <- newEmptyMVar 
+  svcCtrlHandlerPtr  <- $(C.mkFunPtr [t|DWORD -> DWORD -> LPVOID -> LPVOID -> IO ()|]) (svcCtrlHandler svcCtrlMsg)
   svcStatusPtr <- newForeignPtr_ =<< [C.exp| SERVICE_STATUS* {(SERVICE_STATUS*) malloc (sizeof (SERVICE_STATUS))}|]
   gSvcStatusHandle <- newForeignPtr_ =<< [C.block| SERVICE_STATUS_HANDLE {
     SERVICE_STATUS* gSvcStatus = $fptr-ptr:(SERVICE_STATUS* svcStatusPtr);
-    SERVICE_STATUS_HANDLE gSvcStatusHandle = RegisterServiceCtrlHandler( 
+    SERVICE_STATUS_HANDLE gSvcStatusHandle = RegisterServiceCtrlHandlerEx( 
         $bs-ptr:svcName,
-        $(void (*svcCtrlHandlerPtr) (DWORD)));
+        (LPHANDLER_FUNCTION_EX) $(void (*svcCtrlHandlerPtr) (DWORD, DWORD, LPVOID, LPVOID)),
+        NULL);
 
     if( !gSvcStatusHandle )
     { 
@@ -249,6 +255,10 @@ svcMain svc = do
 
     gSvcStatus->dwServiceType = SERVICE_WIN32_OWN_PROCESS; 
     gSvcStatus->dwServiceSpecificExitCode = 0;
+    gSvcStatus->dwCheckPoint = 0;
+    gSvcStatus->dwControlsAccepted = SERVICE_ACCEPT_STOP | 
+		SERVICE_ACCEPT_SHUTDOWN;
+    
     return gSvcStatusHandle;
   }|]
   atomicModifyIORef' svcState (\st -> (st { svcStatus = svcStatusPtr
@@ -259,17 +269,19 @@ svcMain svc = do
     True -> svcReportEvent (fromString "RegisterServiceCtrlHandler")
     False -> do
       reportSvcStatus ReportSvcStartPending
-      svcInit svc
+      svcInit svcCtrlMsg svc
 
 
-svcCtrlHandler :: DWORD -> IO ()
-svcCtrlHandler SERVICE_CONTROL_STOP = do
+svcCtrlHandler :: MVar SvcCtrlMsg -> DWORD -> DWORD -> LPVOID -> LPVOID -> IO ()
+svcCtrlHandler svcCtrlMsg SERVICE_CONTROL_STOP _ _ _= do
   svcReportEvent (fromString "Inside SVC Ctrl Handler")
   reportSvcStatus ReportSvcStopPending
-  stopSvc
+  putMVar svcCtrlMsg SvcCtrlMsg
+  -- stopSvc
   currState <- getSvcCurrentState
   reportSvcStatus (ServiceReport (coerce currState) NO_ERROR 0)
-svcCtrlHandler dw = do
+  svcReportEvent (fromString "End of SVC Ctrl Handler")
+svcCtrlHandler svcCtrlMsg dw _ _ _ = do
   svcReportEvent (fromString ("svcReportEvent: Ignoring " ++ (show dw)))
 
 reportSvcStatus :: ServiceReport -> IO ()
@@ -292,7 +304,8 @@ reportSvcStatus report = do
 
     if (dwCurrentState == SERVICE_START_PENDING)
         gSvcStatus->dwControlsAccepted = 0;
-    else gSvcStatus->dwControlsAccepted = SERVICE_ACCEPT_STOP;
+    else gSvcStatus->dwControlsAccepted = SERVICE_ACCEPT_STOP | 
+		SERVICE_ACCEPT_SHUTDOWN;
 
     if ( (dwCurrentState == SERVICE_RUNNING) ||
            (dwCurrentState == SERVICE_STOPPED) )

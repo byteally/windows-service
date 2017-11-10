@@ -78,3 +78,4 @@ Session.vim
 .netrwhist
 # auto-generated tag files
 tags
+src/*.c
