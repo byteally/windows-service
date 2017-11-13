@@ -8,7 +8,6 @@ import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import qualified Language.C.Inline as C
 import qualified Language.C.Types as C
---import qualified Language.C.Inline.Cpp as CPP
 import           Data.Monoid ((<>))
 import Data.String
 import Data.Word
@@ -146,60 +145,16 @@ svcUnInstall = [C.block|void {
 }|]
 
 
-stopSvc :: IO ()
-stopSvc = do
-  svcReportEvent (fromString "Start: stopSvc")
-  stopEventHPtr <- svcStopEventHandle <$> readIORef svcState
-  [C.block| void {
-    HANDLE ghSvcStopEvent = $fptr-ptr:(HANDLE stopEventHPtr);
-    SetEvent(ghSvcStopEvent);
-  }|]
-  svcReportEvent (fromString "End: stopSvc")
-
-createSvcEvent :: IO Bool
-createSvcEvent = do
-  -- stopEventHPtr <- svcStopEventHandle <$> readIORef svcState
-  stopEventHPtr <- newForeignPtr_ =<< [C.block| HANDLE {
-
-    // Create an event. The control handler function, SvcCtrlHandler,
-    // signals this event when it receives the stop control code.
-
-    HANDLE ghSvcStopEvent = CreateEvent(
-                         NULL,    // default security attributes
-                         TRUE,    // manual reset event
-                         FALSE,   // not signaled
-                         NULL);   // no name
-    return ghSvcStopEvent;
-  }|]
-  atomicModifyIORef' svcState (\st -> (st { svcStopEventHandle = stopEventHPtr
-                                          }, ()))
-  withForeignPtr stopEventHPtr $ \stopEventHPtr' -> case stopEventHPtr' == nullPtr of
-    True -> reportSvcStatus ReportSvcStopped >> pure False
-    False -> pure True
-
 svcInit :: MVar SvcCtrlMsg -> IO () -> IO ()
 svcInit svcCtrlMsg svc = do
   svcReportEvent (fromString "Inside SVC Init")
-  isEvtCreated <- pure True --createSvcEvent
-  when (not isEvtCreated) (reportSvcStatus ReportSvcStopped) 
-  when isEvtCreated $ do
-    stopEventHPtr <- svcStopEventHandle <$> readIORef svcState
-    reportSvcStatus ReportSvcRunning
-    svcAsync <- async svc
-    {-
-    [C.block| void {
-      HANDLE ghSvcStopEvent = $fptr-ptr:(HANDLE stopEventHPtr);
-      // WaitForSingleObject(ghSvcStopEvent, INFINITE);
-      while (WaitForSingleObject(ghSvcStopEvent, 0) != WAIT_OBJECT_0)
-      {
-        Sleep(3000);
-      }
-    }|]
-    -}
-    void $ takeMVar svcCtrlMsg 
-    svcReportEvent (fromString "Cancelling HS SVC")
-    cancel svcAsync 
-    reportSvcStatus ReportSvcStopped
+  stopEventHPtr <- svcStopEventHandle <$> readIORef svcState
+  reportSvcStatus ReportSvcRunning
+  svcAsync <- async svc
+  void $ takeMVar svcCtrlMsg 
+  svcReportEvent (fromString "Cancelling HS SVC")
+  cancel svcAsync 
+  reportSvcStatus ReportSvcStopped
 
 svcStart :: IO () -> IO ()
 svcStart svc = do
@@ -277,7 +232,6 @@ svcCtrlHandler svcCtrlMsg SERVICE_CONTROL_STOP _ _ _= do
   svcReportEvent (fromString "Inside SVC Ctrl Handler")
   reportSvcStatus ReportSvcStopPending
   putMVar svcCtrlMsg SvcCtrlMsg
-  -- stopSvc
   currState <- getSvcCurrentState
   reportSvcStatus (ServiceReport (coerce currState) NO_ERROR 0)
   svcReportEvent (fromString "End of SVC Ctrl Handler")
