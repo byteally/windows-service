@@ -31,9 +31,6 @@ C.include "<windows.h>"
 C.include "<tchar.h>"
 C.include "<strsafe.h>"
 
-svcName :: ByteString
-svcName = fromString "HSSVVNAME"
-
 data SvcState = SvcState
   { svcStatusHandle :: ForeignPtr SvcStatusHandle
   , svcStatus :: ForeignPtr SvcStatus
@@ -49,10 +46,28 @@ svcState = unsafePerformIO $ do
                )
 {-# NOINLINE svcState #-}
   
+data SvcInstallArg = SvcInstallArg_
+  { svcName :: ByteString
+  , svcDisplayName :: ByteString
+  , svcBinArgs :: String
+  } deriving (Show, Eq)
 
-svcInstall :: IO ()
-svcInstall = do
-  svcBin <- fromString <$> getExecutablePath
+defSvcInstallArg :: ByteString -> SvcInstallArg
+defSvcInstallArg name = SvcInstallArg_
+  { svcName = name
+  , svcDisplayName = name
+  }
+  
+svcInstall :: SvcInstallArg -> IO ()
+svcInstall iargs = do
+  svcBin' <- getExecutablePath
+  let svcBin = fromString $ concat
+        [ svcBin'
+        , " "
+        , svcBinArgs iargs
+        ]
+  let svcName' = svcName iargs
+      svcDName = svcDisplayName iargs
   [C.block| void {
   SC_HANDLE schSCManager;
   SC_HANDLE schService;
@@ -71,8 +86,8 @@ svcInstall = do
 
   schService = CreateService( 
         schSCManager,              // SCM database        
-        $bs-ptr:svcName,           // name of service 
-        $bs-ptr:svcName,           // service name to display 
+        $bs-ptr:svcName',          // name of service 
+        $bs-ptr:svcDName,          // service name to display 
         SERVICE_ALL_ACCESS,        // desired access 
         SERVICE_WIN32_OWN_PROCESS, // service type 
         SERVICE_DEMAND_START,      // start type 
@@ -99,8 +114,8 @@ svcInstall = do
     CloseServiceHandle(schSCManager);
 }|]
 
-svcUnInstall :: IO ()
-svcUnInstall = [C.block|void {
+svcUnInstall :: ByteString -> IO ()
+svcUnInstall svcName' = [C.block|void {
     SC_HANDLE schSCManager;
     SC_HANDLE schService;
     SERVICE_STATUS ssStatus; 
@@ -122,7 +137,7 @@ svcUnInstall = [C.block|void {
    
     schService = OpenService( 
         schSCManager,       // SCM database 
-        $bs-ptr:svcName,    // name of service 
+        $bs-ptr:svcName',    // name of service 
         DELETE);            // need delete access 
  
     if (schService == NULL)
@@ -145,26 +160,26 @@ svcUnInstall = [C.block|void {
 }|]
 
 
-svcInit :: MVar SvcCtrlMsg -> IO () -> IO ()
-svcInit svcCtrlMsg svc = do
-  svcReportEvent (fromString "Inside SVC Init")
+svcInit :: ByteString -> MVar SvcCtrlMsg -> IO () -> IO ()
+svcInit svcName' svcCtrlMsg svc = do
+  svcReportEvent svcName' (fromString "Inside SVC Init")
   stopEventHPtr <- svcStopEventHandle <$> readIORef svcState
   reportSvcStatus ReportSvcRunning
   svcAsync <- async svc
   void $ takeMVar svcCtrlMsg 
-  svcReportEvent (fromString "Cancelling HS SVC")
+  svcReportEvent svcName' (fromString "Cancelling HS SVC")
   cancel svcAsync 
   reportSvcStatus ReportSvcStopped
 
-svcStart :: IO () -> IO ()
-svcStart svc = do
+svcStart :: ByteString -> IO () -> IO ()
+svcStart svcName' svc = do
   svcMainPtr <- $(C.mkFunPtr [t|DWORD -> Ptr (LPTSTR) -> IO ()|]) $ \argc argv -> do
-    svcReportEvent (fromString "Inside SVC Main")
-    svcMain svc
+    svcReportEvent svcName' (fromString "Inside SVC Main")
+    svcMain svcName' svc
   status <- [C.block| int {
     SERVICE_TABLE_ENTRY DispatchTable[] = 
     { 
-        { $bs-ptr:svcName, (LPSERVICE_MAIN_FUNCTION) $(void (*svcMainPtr)(DWORD, LPTSTR *)) }, 
+        { $bs-ptr:svcName', (LPSERVICE_MAIN_FUNCTION) $(void (*svcMainPtr)(DWORD, LPTSTR *)) }, 
         { NULL, NULL } 
     }; 
  
@@ -178,7 +193,7 @@ svcStart svc = do
     return 1;
   }|]
   when (status == 0) $ do
-    svcReportEvent (fromString "Unable to start service. StartServiceCtrlDispatcher failed")
+    svcReportEvent svcName' (fromString "Unable to start service. StartServiceCtrlDispatcher failed")
 
 getSvcCurrentState :: IO DWORD
 getSvcCurrentState = do
@@ -188,16 +203,16 @@ getSvcCurrentState = do
     return gSvcStatus->dwCurrentState;
 }|]
   
-svcMain :: IO () -> IO ()
-svcMain svc = do
-  svcReportEvent (fromString "Really Inside SVC Main")
+svcMain :: ByteString -> IO () -> IO ()
+svcMain svcName' svc = do
+  svcReportEvent svcName' (fromString "Really Inside SVC Main")
   svcCtrlMsg <- newEmptyMVar 
-  svcCtrlHandlerPtr  <- $(C.mkFunPtr [t|DWORD -> DWORD -> LPVOID -> LPVOID -> IO ()|]) (svcCtrlHandler svcCtrlMsg)
+  svcCtrlHandlerPtr  <- $(C.mkFunPtr [t|DWORD -> DWORD -> LPVOID -> LPVOID -> IO ()|]) (svcCtrlHandler svcName' svcCtrlMsg)
   svcStatusPtr <- newForeignPtr_ =<< [C.exp| SERVICE_STATUS* {(SERVICE_STATUS*) malloc (sizeof (SERVICE_STATUS))}|]
   gSvcStatusHandle <- newForeignPtr_ =<< [C.block| SERVICE_STATUS_HANDLE {
     SERVICE_STATUS* gSvcStatus = $fptr-ptr:(SERVICE_STATUS* svcStatusPtr);
     SERVICE_STATUS_HANDLE gSvcStatusHandle = RegisterServiceCtrlHandlerEx( 
-        $bs-ptr:svcName,
+        $bs-ptr:svcName',
         (LPHANDLER_FUNCTION_EX) $(void (*svcCtrlHandlerPtr) (DWORD, DWORD, LPVOID, LPVOID)),
         NULL);
 
@@ -219,24 +234,24 @@ svcMain svc = do
   atomicModifyIORef' svcState (\st -> (st { svcStatus = svcStatusPtr
                                           , svcStatusHandle = gSvcStatusHandle
                                           }, ()))
-  svcReportEvent (fromString ("After Register Service" ++ (show svcStatusPtr)))
+  svcReportEvent svcName' (fromString ("After Register Service" ++ (show svcStatusPtr)))
   withForeignPtr gSvcStatusHandle $ \gSvcStatusHandle' -> case gSvcStatusHandle' == nullPtr of
-    True -> svcReportEvent (fromString "RegisterServiceCtrlHandler")
+    True -> svcReportEvent svcName' (fromString "RegisterServiceCtrlHandler")
     False -> do
       reportSvcStatus ReportSvcStartPending
-      svcInit svcCtrlMsg svc
+      svcInit svcName' svcCtrlMsg svc
 
 
-svcCtrlHandler :: MVar SvcCtrlMsg -> DWORD -> DWORD -> LPVOID -> LPVOID -> IO ()
-svcCtrlHandler svcCtrlMsg SERVICE_CONTROL_STOP _ _ _= do
-  svcReportEvent (fromString "Inside SVC Ctrl Handler")
+svcCtrlHandler :: ByteString -> MVar SvcCtrlMsg -> DWORD -> DWORD -> LPVOID -> LPVOID -> IO ()
+svcCtrlHandler svcName' svcCtrlMsg SERVICE_CONTROL_STOP _ _ _= do
+  svcReportEvent svcName' (fromString "Inside SVC Ctrl Handler")
   reportSvcStatus ReportSvcStopPending
   putMVar svcCtrlMsg SvcCtrlMsg
   currState <- getSvcCurrentState
   reportSvcStatus (ServiceReport (coerce currState) NO_ERROR 0)
-  svcReportEvent (fromString "End of SVC Ctrl Handler")
-svcCtrlHandler svcCtrlMsg dw _ _ _ = do
-  svcReportEvent (fromString ("svcReportEvent: Ignoring " ++ (show dw)))
+  svcReportEvent svcName' (fromString "End of SVC Ctrl Handler")
+svcCtrlHandler svcName' svcCtrlMsg dw _ _ _ = do
+  svcReportEvent svcName' (fromString ("svcReportEvent: Ignoring " ++ (show dw)))
 
 reportSvcStatus :: ServiceReport -> IO ()
 reportSvcStatus report = do
@@ -277,19 +292,19 @@ reportSvcStatus report = do
    waitHint = coerce (reportWaitHint report)
 
 
-svcReportEvent :: ByteString -> IO ()
-svcReportEvent evt = [C.block| void {
+svcReportEvent :: ByteString -> ByteString -> IO ()
+svcReportEvent svcName' evt = [C.block| void {
     HANDLE hEventSource;
     LPCTSTR lpszStrings[2];
     TCHAR Buffer[80];
 
-    hEventSource = RegisterEventSource(NULL, $bs-ptr:svcName);
+    hEventSource = RegisterEventSource(NULL, $bs-ptr:svcName');
 
     if( NULL != hEventSource )
     {
         StringCchPrintf(Buffer, 80, TEXT("%s failed with %d"), $bs-ptr:evt, GetLastError());
 
-        lpszStrings[0] = $bs-ptr:svcName;
+        lpszStrings[0] = $bs-ptr:svcName';
         lpszStrings[1] = Buffer;
 
         ReportEvent(hEventSource,        // event log handle

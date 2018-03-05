@@ -12,9 +12,11 @@ import Data.String
 main :: IO ()
 main = do
   args <- getArgs
+  let tstSvcName = (fromString "testHaskSvc")
+      installArgs = defSvcInstallArg tstSvcName 
   case ("-i" `elem` args, "-u" `elem` args) of
-    (True, _) -> svcInstall
-    (False, True) -> svcUnInstall
-    (False, False) -> svcStart $ forever $ do
+    (True, _) -> svcInstall installArgs
+    (False, True) -> svcUnInstall tstSvcName
+    (False, False) -> svcStart tstSvcName $ forever $ do
       threadDelay 10000000
-      svcReportEvent (fromString "Worker")
+      svcReportEvent tstSvcName (fromString "Worker")
